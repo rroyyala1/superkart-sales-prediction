@@ -49,12 +49,14 @@ if st.button("Predict", type="primary"):
     try:
         response = requests.post(f"{BACKEND_URL}/v1/predict", json=product_data, timeout=30)
         if response.status_code == 200:
-            prediction = response.json()["Predicted_Product_Store_Sales_Total"]
-            st.success(f"Predicted Product Store Sales Total: {prediction:,.2f}")
+            result = response.json()
+            st.success(f"Predicted Product Store Sales Total: {result['Predicted_Product_Store_Sales_Total']:,.2f}")
+            for warning in result.get("warnings", []):  # e.g. a category the model has never seen
+                st.warning(warning)
         else:
-            st.error(f"Error from the API ({response.status_code}): {response.text}")
-    except requests.exceptions.RequestException as e:
-        st.error(f"Could not connect to the backend at {BACKEND_URL}: {e}")
+            st.error(f"Error from the API ({response.status_code}): {response.json().get('error', response.text)}")
+    except (requests.exceptions.RequestException, ValueError) as e:
+        st.error(f"Could not get a prediction from the backend at {BACKEND_URL}: {e}")
 
 # ---------------------------------------------------------------- Batch prediction
 st.subheader("Batch Prediction")
@@ -64,7 +66,14 @@ st.write("Upload a CSV file with the columns: Product_Weight, Product_Sugar_Cont
 
 uploaded_file = st.file_uploader("Upload CSV file for batch prediction", type=["csv"])
 
+# A button is only True for the one rerun after it is clicked, so the batch results are kept in
+# st.session_state - otherwise they would disappear on the next rerun (e.g. when Download is clicked)
+if "batch_results" not in st.session_state:
+    st.session_state.batch_results = None
+    st.session_state.batch_warnings = ""
+
 if st.button("Predict Batch"):
+    st.session_state.batch_results = None  # clear any previous results
     if uploaded_file is None:
         st.warning("Please upload a CSV file first.")
     else:
@@ -73,15 +82,22 @@ if st.button("Predict Batch"):
                                      files={"file": uploaded_file.getvalue()}, timeout=120)
             if response.status_code == 200:
                 predictions = response.json()
-                # Attach the predictions to the uploaded rows and show them
+                # Attach the predictions to the uploaded rows
                 results = pd.read_csv(uploaded_file)
                 results["Predicted_Sales"] = [predictions[str(i)] for i in results.index]
-                st.success(f"Batch predictions completed for {len(results)} rows.")
-                st.dataframe(results)
-                # Let the user download the predictions
-                st.download_button("Download Predictions", results.to_csv(index=False),
-                                   file_name="superkart_predictions.csv", mime="text/csv")
+                st.session_state.batch_results = results
+                st.session_state.batch_warnings = response.headers.get("X-Prediction-Warnings", "")
             else:
-                st.error(f"Error from the API ({response.status_code}): {response.text}")
-        except requests.exceptions.RequestException as e:
-            st.error(f"Could not connect to the backend at {BACKEND_URL}: {e}")
+                st.error(f"Error from the API ({response.status_code}): {response.json().get('error', response.text)}")
+        except (requests.exceptions.RequestException, ValueError) as e:
+            st.error(f"Could not get predictions from the backend at {BACKEND_URL}: {e}")
+
+# Render the stored results outside the button block, so they stay on screen across reruns
+if st.session_state.batch_results is not None:
+    results = st.session_state.batch_results
+    st.success(f"Batch predictions completed for {len(results)} rows.")
+    for warning in filter(None, st.session_state.batch_warnings.split(" | ")):
+        st.warning(warning)
+    st.dataframe(results)
+    st.download_button("Download Predictions", results.to_csv(index=False),
+                       file_name="superkart_predictions.csv", mime="text/csv")
